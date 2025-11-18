@@ -1,0 +1,29 @@
+{
+  "sys_instruction" : {
+    "your_roll" : "",
+    "your_name" : "",
+    "val_name" : ""
+  },
+  "chat_history" : [
+    {
+      "seq" : 0,
+      "char" : "NPC",
+      "content" : ""
+    }
+  ],
+  "heritage" : {
+    "name" : "Geo-Buk-Seon",
+    "keywords" : [
+    {
+      "keyword" : "",
+      "isDone" : 0,
+      "desc" : ""
+    },
+    {
+
+    }
+  ]
+  }
+
+
+}
