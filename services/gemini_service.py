@@ -4,7 +4,7 @@ from google.generativeai.types import GenerationConfig
 from models.data_models import GeminiEvalRequest, GeminiEvalResponse
 
 # 실제 API 키를 입력하세요
-GEMINI_API_KEY = "AIzaSyCyCDeExjusuOkVEnUaeYxDjw8MxuhWCVk"
+GEMINI_API_KEY = "YOUR_KEY"
 genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_MODEL = genai.GenerativeModel('gemini-2.0-flash')
 

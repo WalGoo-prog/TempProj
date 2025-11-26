@@ -1,7 +1,7 @@
 import azure.cognitiveservices.speech as speechsdk
 import asyncio
 
-AZURE_SPEECH_KEY = "EPvczCnWGpVTAqsYoGldEHqwv6iAcfnLBi7cHAQAye9lJU2rAJ5sJQQJ99BKAC3pKaRXJ3w3AAAYACOGZTk5"
+AZURE_SPEECH_KEY = "YOUR_KEY"
 AZURE_REGION = "eastasia"
 
 
