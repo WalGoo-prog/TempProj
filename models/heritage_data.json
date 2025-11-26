@@ -1,0 +1,52 @@
+{
+  "GwangHwaMoon" : {
+    "keywords" : [
+      {
+        "era" : "1395",
+        "sample_question" : "When was this built?"
+      },
+      {
+        "who" : "태조",
+        "sample_question" : "who was built it?"
+      }
+    ]
+  },
+
+  "GyeongHeoiRu" : {
+    "keywords" : [
+      {
+        "era" : "1395",
+        "sample_question" : "When was this built?"
+      }
+    ]
+  },
+
+  "JoseonTongShinSaSeon" : {
+    "keywords" : [
+      {
+        "era" : "1695",
+        "sample_question" : ""
+      }
+    ]
+  },
+
+  "SoSwaeWon" : {
+    "keywords" : [
+      {
+        "era" : "1695",
+        "sample_question" : ""
+      }
+
+    ]
+  },
+
+  "NakAnEupSeong" : {
+    "keywords" : [
+      {
+        "era" : "1695",
+        "sample_question" : ""
+      }
+
+    ]
+  }
+}

@@ -1,128 +1,157 @@
-# main.py
-
 import os
 import tempfile
 import traceback
-import json
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import asyncio  # asyncio.to_thread 사용을 위해 필요
 
-# ======== [1] 서비스 및 모델 임포트 ========
-from models.data_models import GeminiRequestPayload, GeminiResponsePayload, ChatMessage, Heritage, KeywordItem
+from models.data_models import GameState, GeminiEvalRequest, ChatMessage, EvaluationLog
 from services.stt_service import transcribe_audio
-from services.gemini_service import generate_structured_reply
 from services.azure_service import get_pronunciation_score
+from services.gemini_service import evaluate_and_respond, generate_opening_question
 from services.tts_service import get_mp3_base64
+from utils.text_correction import correct_heritage_names
+from utils.report_manager import save_heritage_report
 
-# ======== [2] 상수 설정 ========
 app = FastAPI()
 
-# TTS Bypass: 미리 정의된 답변
-PREDEFINED_RESPONSES = {
-    "WELL_DONE": "Great, I got it clearly.",
-    "WRONG_DESC": "It maybe wrong. Can you explain me again?",
-    "NO_MIC": "I can't hear you. Can you say it again?",
-    "BAD_PRONOUNCE": "I can't understand what you said. Can you say it again?",
-    "DONE": "Well, I think it's enough. Let's move to next heritage."
-}
-# 발음 점수 임계값 설정 (70점 미만 시 BAD_PRONOUNCE로 간주)
-PRONUNCIATION_THRESHOLD = 70
 
-
-@app.post("/interact_with_json")
-async def interact_with_json(
-        audio_file: UploadFile = File(...),
-        request_data: str = Form(...)  # Unity에서 JSON 문자열을 Form Data로 보냄
-):
-    """
-    유니티에서 음성 파일과 JSON 데이터를 받아 처리하는 메인 엔드포인트.
-    TTS Bypass 로직이 포함되어 있어, 특정 조건에서는 Gemini 호출을 건너뜁니다.
-    """
-    user_wav_path = None
-
+# [수정] start_conversation에서 강제 스킵 로직 제거 (클라이언트가 제어함)
+@app.post("/start_conversation")
+async def start_conversation(request_data: str = Form(...)):
     try:
-        # 1. 요청 JSON 파싱 및 유효성 검증
-        # Pydantic 모델을 사용하여 데이터 유효성 검사 및 객체화
-        request_dict = json.loads(request_data)
-        request_payload = GeminiRequestPayload.model_validate(request_dict)
+        game_state = GameState.model_validate_json(request_data)
 
-        # 2. 오디오 파일 임시 저장
-        user_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-        user_wav_path = user_wav.name
-        user_wav.write(await audio_file.read())
-        user_wav.close()
+        # 현재 인덱스의 문화재 정보 가져오기
+        current_heritage = game_state.heritages[game_state.current_index]
 
-        # 3. STT 변환 (비동기)
-        user_text = await transcribe_audio(user_wav_path)
+        # 타겟 키워드 (안 끝난 것)
+        target_keyword_obj = next((k for k in current_heritage.keywords if not k.isDone), None)
 
-        # 4. 발음 점수 평가 (비동기)
-        score = await get_pronunciation_score(user_wav_path, user_text)
-
-        # 5. TTS Bypass 및 Gemini 호출 로직 분기
-        npc_chat = ""
-        final_game_status = "CONTINUE"
-
-        # [조건 A: 마이크 입력 및 발음 점수 확인]
-        if not user_text.strip() or (score < PRONUNCIATION_THRESHOLD and len(user_text.strip()) < 5):
-            # STT 결과가 비었거나(마이크 문제/침묵) 발음이 너무 낮음
-            npc_chat = PREDEFINED_RESPONSES["NO_MIC"]
-            final_game_status = "BAD_INPUT"
-
-        elif score < PRONUNCIATION_THRESHOLD and user_text.strip():
-            # STT는 성공했으나 발음 점수가 임계값 미만
-            npc_chat = PREDEFINED_RESPONSES["BAD_PRONOUNCE"]
-            final_game_status = "BAD_PRONOUNCE"
-
-        # [조건 B: 정상 입력 -> Gemini 호출]
+        npc_text = ""
+        if not target_keyword_obj:
+            # 이미 다 끝난 곳에 억지로 요청을 보낸 경우 방어 코드
+            npc_text = f"We have already finished touring {current_heritage.name}."
         else:
-            # UserInput을 Payload에 업데이트하고 Gemini에게 전달
-            request_payload.user_input_text = user_text
+            # 오프닝 질문 생성
+            npc_text = await generate_opening_question(
+                "Foreign Friend",
+                current_heritage.name,
+                target_keyword_obj.keyword,
+                target_keyword_obj.sample_question
+            )
 
-            # 5-1. Gemini 구조화된 답변 생성 (비동기)
-            gemini_result: GeminiResponsePayload = await generate_structured_reply(request_payload)
+        game_state.chat_history.append(ChatMessage(role="npc", content=npc_text))
+        audio_base64 = await get_mp3_base64(npc_text)
 
-            npc_chat = gemini_result.npc_chat
-            final_game_status = gemini_result.conversation_status
-
-            # 클라이언트가 필요로 하는 추가 데이터(is_correct, next_keyword_seq 등)는
-            # 이 함수의 반환 값에 명시적으로 추가하여 전달하거나
-            # 클라이언트가 game_status를 보고 판단하도록 합니다.
-            # 여기서는 편의상 Gemini의 응답 객체 전체를 JSON으로 변환해 함께 보낼 수 있습니다.
-
-            # [추가: Gemini 평가 데이터를 응답에 직접 추가]
-            gemini_evaluation = gemini_result.model_dump()
-
-        # 6. 최종 NPC 답변 TTS 생성 및 Base64 인코딩 (비동기)
-        audio_base64 = await get_mp3_base64(npc_chat)
-
-        # 7. 최종 응답 반환 (클라이언트가 처리할 데이터)
         return {
-            "user_stt": user_text,
-            "npc_response": npc_chat,
-            "pronunciation_score": score,
+            "npc_response": npc_text,
             "audio_base64": audio_base64,
-            "game_status": final_game_status,
-            "gemini_evaluation": gemini_evaluation if 'gemini_evaluation' in locals() else None
+            "updated_game_state": game_state.model_dump()
         }
 
     except Exception as e:
-        # 예상치 못한 시스템 레벨 에러 발생 시 로그 출력 및 500 에러 반환
-        print("================ UNEXPECTED SERVER ERROR ================")
         traceback.print_exc()
-        # Clean up in case of unexpected crash before finally block could run fully
-        try:
-            if user_wav_path and os.path.exists(user_wav_path):
-                os.remove(user_wav_path)
-        except:
-            pass
-        raise HTTPException(status_code=500, detail="Unexpected server error occurred. Check server logs.")
+        raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/interact")
+async def interact(audio_file: UploadFile = File(...), request_data: str = Form(...)):
+    user_wav_path = None
+    try:
+        game_state = GameState.model_validate_json(request_data)
+        current_heritage = game_state.heritages[game_state.current_index]
+        target_keyword_obj = next((k for k in current_heritage.keywords if not k.isDone), None)
+
+        if not target_keyword_obj:
+            return {"npc_response": "This area is clear.", "updated_game_state": game_state.model_dump()}
+
+        # --- (STT, 평가, Gemini 호출 로직은 기존과 동일) ---
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(await audio_file.read())
+            user_wav_path = tmp.name
+
+        raw_stt = await transcribe_audio(user_wav_path)
+        user_text = correct_heritage_names(raw_stt, current_heritage.name)
+        pron_score = await get_pronunciation_score(user_wav_path, user_text)
+
+        gemini_req = GeminiEvalRequest(
+            npc_persona="Foreign Friend",
+            user_input=user_text,
+            pronunciation_score=pron_score,
+            target_keyword=target_keyword_obj.keyword,
+            sample_question=target_keyword_obj.sample_question,
+            retry_count=game_state.retry_count
+        )
+
+        ai_result = await evaluate_and_respond(gemini_req)
+        # ------------------------------------------------------
+
+        final_npc_response = ai_result.reaction
+
+        if ai_result.evaluation == "PASS":
+            target_keyword_obj.isDone = True
+            game_state.retry_count = 0
+
+            # 남은 키워드 확인
+            remain_keywords = [k for k in current_heritage.keywords if not k.isDone]
+
+            if remain_keywords:
+                # [A] 같은 문화재 내 다음 질문 (계속 진행)
+                next_k = remain_keywords[0]
+                next_q = await generate_opening_question(
+                    "Foreign Friend", current_heritage.name, next_k.keyword, next_k.sample_question
+                )
+                final_npc_response = f"{ai_result.reaction} {next_q}"
+            else:
+                # [B] 현재 문화재 완료 -> [수정] 여기서 끝냄 (다음 문화재로 안 넘어감)
+                current_heritage.completed = True
+                save_heritage_report(game_state, current_heritage.name)
+
+                # 종료 멘트만 생성
+                final_npc_response = f"{ai_result.reaction} We learned everything about {current_heritage.name}. Let's move to another place!"
+
+                # [중요] 인덱스 증가시키지 않음.
+                # 클라이언트가 'completed=True'를 보고 스스로 UI를 닫게 만듦.
+        else:
+            # [실패] 기존 로직 유지
+            if game_state.retry_count < 3:
+                game_state.retry_count += 1
+                final_npc_response = f"{ai_result.reaction} Could you say that again?"
+            else:
+                target_keyword_obj.isDone = True
+                game_state.retry_count = 0
+
+                remain_keywords = [k for k in current_heritage.keywords if not k.isDone]
+                if remain_keywords:
+                    next_k = remain_keywords[0]
+                    next_q = await generate_opening_question("Friend", current_heritage.name, next_k.keyword,
+                                                             next_k.sample_question)
+                    final_npc_response = f"The answer is {target_keyword_obj.keyword}. {next_q}"
+                else:
+                    # 실패로 끝났지만 마지막 키워드였던 경우 -> 완료 처리
+                    current_heritage.completed = True
+                    save_heritage_report(game_state, current_heritage.name)
+                    final_npc_response = f"The answer is {target_keyword_obj.keyword}. That's all for here."
+
+        # 상태 반환
+        game_state.chat_history.append(ChatMessage(role="user", content=user_text))
+        game_state.chat_history.append(ChatMessage(role="npc", content=final_npc_response))
+        audio_base64 = await get_mp3_base64(final_npc_response)
+
+        return {
+            "user_stt": user_text,
+            "pronunciation_score": pron_score,
+            "npc_response": final_npc_response,
+            "feedback": ai_result.feedback_korean,
+            "audio_base64": audio_base64,
+            "updated_game_state": game_state.model_dump()
+        }
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # 임시 파일 정리 (try 블록 내부에서 닫았으므로, 삭제만 시도)
-        try:
-            if user_wav_path and os.path.exists(user_wav_path):
+        if user_wav_path and os.path.exists(user_wav_path):
+            try:
                 os.remove(user_wav_path)
-        except Exception as cleanup_error:
-            print(f"File cleanup warning in finally: {cleanup_error}")
-
-# 실행 명령어: uvicorn main:app --reload
+            except:
+                pass
