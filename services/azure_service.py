@@ -1,8 +1,6 @@
 import azure.cognitiveservices.speech as speechsdk
 import asyncio
 
-AZURE_SPEECH_KEY = "YOUR_AZURE_KEY"
-AZURE_REGION = "koreacentral"
 
 
 def blocking_assess_pronunciation(audio_path: str, reference_text: str) -> float:

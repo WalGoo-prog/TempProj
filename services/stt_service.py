@@ -12,7 +12,7 @@ except Exception as e:
 # STT 처리는 시간이 걸리는 블로킹 작업이므로, 비동기로 실행될 수 있도록 함수 정의
 def blocking_transcribe(audio_path: str) -> str:
     if WHISPER_MODEL is None:
-        return ""  # 모델 로드 실패 시 빈 문자열 반환
+        return ""
 
     try:
         # 실제 Whisper API/모델 호출
@@ -20,9 +20,8 @@ def blocking_transcribe(audio_path: str) -> str:
         return result["text"].strip()
     except Exception as e:
         print(f"STT Error: {e}")
-        return ""  # 오류 발생 시 빈 문자열 반환
+        return ""
 
 
 async def transcribe_audio(audio_path: str) -> str:
-    # 블로킹 함수를 별도 스레드에서 실행
     return await asyncio.to_thread(blocking_transcribe, audio_path)

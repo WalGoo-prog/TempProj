@@ -1,68 +1,122 @@
-# services/gemini_service.py (수정됨)
 import google.generativeai as genai
 import asyncio
-import json
-from models.data_models import GeminiRequestPayload, GeminiResponsePayload
+from google.generativeai.types import GenerationConfig
+from models.data_models import GeminiEvalRequest, GeminiEvalResponse
 
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+
+GEMINI_API_KEY = ""
 genai.configure(api_key=GEMINI_API_KEY)
-
-try:
-    # JSON Mode를 사용하기 위해 1.5-flash 권장
-    GEMINI_MODEL = genai.GenerativeModel('gemini-2.0-flash')
-except Exception as e:
-    print(f"CRITICAL: Gemini Model initialization failed. {e}")
-    GEMINI_MODEL = None
+GEMINI_MODEL = genai.GenerativeModel('gemini-2.0-flash')
 
 
-def blocking_generate_structured_reply(request_payload: GeminiRequestPayload) -> GeminiResponsePayload:
-    if GEMINI_MODEL is None:
-        # 서비스 불가 시 안전한 응답 반환
-        return GeminiResponsePayload(
-            npc_chat="Gemini service is unavailable. Please check the API key.",
-            is_correct=False,
-            feedback_korean="API 서비스 오류",
-            conversation_status="ERROR"
-        )
-
+# =================================================================
+# [1] 유저 답변 평가 및 반응 (JSON 반환)
+# =================================================================
+def blocking_evaluate_and_respond(req: GeminiEvalRequest) -> GeminiEvalResponse:
     try:
-        # Pydantic 객체를 JSON 문자열로 변환하여 Prompt에 포함
-        prompt_content = request_payload.model_dump_json(indent=2)
+        system_prompt = f"""
+        You are {req.npc_persona}, a friendly guide.
 
-        # 시스템 프롬프트: JSON 분석 및 답변 생성 지시
-        system_instruction = f"""
-        Analyze the following JSON payload. Your persona is defined in 'your_role'.
-        1. Evaluate 'user_input_text' based on the 'heritage' and current 'keyword'.
-        2. Generate the next question/reply in English and put it in 'npc_chat'.
-        3. Determine if the user's response was correct (set 'is_correct').
-        4. Provide brief Korean feedback.
-        5. Set 'conversation_status' and 'next_keyword_seq' based on the conversation flow.
+        Current Goal: User needs to explain "{req.target_keyword}".
+        Reference Answer: "{req.sample_question}"
+        User Input: "{req.user_input}"
+        Pronunciation Score: {req.pronunciation_score} (Threshold: 70)
 
-        Payload:\n{prompt_content}
+        Task:
+        1. Evaluate Meaning (PASS/FAIL).
+           - PASS if user input conveys the meaning of "{req.target_keyword}".
+        2. Evaluate Grammar.
+
+        [IMPORTANT Output Rules]
+        Return JSON with these keys:
+        1. "evaluation": "PASS" or "FAIL"
+        2. "reason": Internal reasoning.
+        3. "reaction": NPC's VERBAL response. (e.g., "Exactly!", "Hmm...").
+           - Keep it short (max 1 sentence). Do NOT include the next question here.
+        4. "next_question": Leave empty "". (Logic handles this separately).
+        5. "feedback_korean": Educational feedback.
+           - If PASS but grammar error: Point it out gently.
+           - If FAIL: Explain why without spoilers if possible.
         """
 
-        # Gemini 호출 (JSON Mode 사용)
         response = GEMINI_MODEL.generate_content(
-            system_instruction,
-            config=genai.types.GenerateContentConfig(
-                response_mime_type="application/json",
-                # 응답 스키마를 Pydantic 모델에 맞춤
-                response_schema=GeminiResponsePayload
-            )
+            system_prompt,
+            generation_config=GenerationConfig(response_mime_type="application/json")
         )
 
-        # 응답 문자열을 Pydantic 모델로 파싱하여 반환
-        return GeminiResponsePayload.model_validate_json(response.text)
+        if not response.text:
+            raise ValueError("Empty response")
+
+        return GeminiEvalResponse.model_validate_json(response.text)
 
     except Exception as e:
-        print(f"Gemini API Error during structured generation: {e}")
-        return GeminiResponsePayload(
-            npc_chat="I couldn't process the conversation data.",
-            is_correct=False,
-            feedback_korean=f"처리 중 오류 발생: {str(e)[:50]}",
-            conversation_status="ERROR"
+        print(f"Gemini Eval Error: {e}")
+        return GeminiEvalResponse(
+            evaluation="FAIL",
+            reason=f"Error: {e}",
+            reaction="Sorry, I couldn't hear that clearly.",
+            next_question="",
+            feedback_korean="오류가 발생했습니다."
         )
 
 
-async def generate_structured_reply(request_payload: GeminiRequestPayload) -> GeminiResponsePayload:
-    return await asyncio.to_thread(blocking_generate_structured_reply, request_payload)
+# =================================================================
+# [2] 오프닝 질문 생성 (첫 만남 / 같은 문화재 내 다음 질문)
+# =================================================================
+def blocking_generate_opening(persona, heritage, keyword, sample_q):
+    try:
+        prompt = f"""
+        Role: You are {persona} at {heritage}.
+        Task: Ask a question about "{keyword}".
+
+        Reference Question: "{sample_q}"
+
+        [STRICT RULES]
+        1. Do NOT mention the answer "{keyword}" in your question.
+        2. The user must say "{keyword}" to answer.
+        3. Keep it simple (1-2 sentences).
+        """
+        response = GEMINI_MODEL.generate_content(prompt)
+        return response.text.strip()
+    except:
+        return sample_q
+
+
+# =================================================================
+# [3] 전환 질문 생성 (다른 문화재로 이동 시 - Hello 금지)
+# =================================================================
+def blocking_generate_transition(persona, prev_heritage, curr_heritage, keyword, sample_q):
+    try:
+        prompt = f"""
+        Role: You are {persona}.
+        Context: We just finished touring {prev_heritage} and moved to {curr_heritage}.
+
+        Task:
+        1. Say a very short transition phrase (e.g., "Now we are at {curr_heritage}").
+        2. Immediately ASK a question about the new keyword "{keyword}".
+
+        Reference Question: "{sample_q}"
+
+        [STRICT RULES]
+        - Do NOT say "Hello" or "Nice to meet you". We are already talking.
+        - Do NOT mention the answer "{keyword}" in your question.
+        """
+        response = GEMINI_MODEL.generate_content(prompt)
+        return response.text.strip()
+    except:
+        return f"Now let's look at {curr_heritage}. {sample_q}"
+
+
+# =================================================================
+# [Async Wrappers]
+# =================================================================
+async def evaluate_and_respond(req):
+    return await asyncio.to_thread(blocking_evaluate_and_respond, req)
+
+
+async def generate_opening_question(persona, heritage, keyword, sample_q):
+    return await asyncio.to_thread(blocking_generate_opening, persona, heritage, keyword, sample_q)
+
+
+async def generate_transition_question(persona, prev_h, curr_h, keyword, sample_q):
+    return await asyncio.to_thread(blocking_generate_transition, persona, prev_h, curr_h, keyword, sample_q)

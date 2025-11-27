@@ -1,59 +1,92 @@
-# models/data_models.py
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Dict
 
 
-# ====================
-# [1] User Chat History 모델
-# ====================
+# ==========================================
+# [1] 게임 상태 관리 모델 (Unity <-> Server)
+# ==========================================
+
 class ChatMessage(BaseModel):
-    seq: int = Field(description="다이얼로그 순서")
-    char: str = Field(description="발화 주체 (user 또는 npc)")
-    content: str = Field(description="발화 내용")
+    role: str
+    content: str
 
 
-# ====================
-# [2] Heritage Keywords 모델
-# ====================
-class KeywordItem(BaseModel):
-    seq: int = Field(description="키워드 설명 순서")
-    keyword: str = Field(description="설명해야 할 핵심 키워드")
-    sample_question: str = Field(description="NPC가 참고할 질문 예시 (한국어)")
+class EvaluationLog(BaseModel):
+    turn_index: int
+    user_input: str
+    target_keyword: str
+    pronunciation_score: float
+    grammar_evaluation: str
+    feedback: str
 
 
-# ====================
-# [3] Heritage Context 모델
-# ====================
-class Heritage(BaseModel):
-    name: str = Field(description="문화재 이름")
-    keywords: List[KeywordItem] = Field(description="설명해야 할 키워드 목록")
-    current_keyword_seq: int = Field(description="현재 설명할 키워드의 seq 번호")
+class KeywordStatus(BaseModel):
+    keyword: str
+    sample_question: str
+    isDone: bool = False
 
 
-# ====================================================
-# [4] Server -> Gemini Request Payload (요청 JSON)
-# ====================================================
-class GeminiRequestPayload(BaseModel):
-    your_role: str = Field(description="Gemini의 페르소나 및 지시사항")
-    chat_history: List[ChatMessage] = Field(description="현재까지의 대화 기록")
-    heritage: Heritage = Field(description="현재 문화재 컨텍스트")
-    user_input_text: str = Field(description="STT로 변환된 유저의 최근 발화 내용")  # Gemini가 평가할 내용
-
-    # 예시 JSON과 일치하도록 Field 정의
-    # your_roll : "너는 유저의 외국인 친구로서, request.json 의 'chat_history' 를 참고하여..."
+class HeritageStatus(BaseModel):
+    name: str
+    completed: bool = False
+    keywords: List[KeywordStatus]
 
 
-# ====================================================
-# [5] Gemini -> Server Response Payload (응답 JSON)
-# ====================================================
-class GeminiResponsePayload(BaseModel):
-    # NPC가 유저에게 할 답변
-    npc_chat: str = Field(description="Gemini가 생성한 영어 답변")
+class PersonaInfo(BaseModel):
+    name: str
+    gender: str
 
-    # 유저 답변 평가 (로직에 따라 필드 추가 가능)
-    is_correct: bool = Field(description="유저의 발화가 키워드 설명에 적절했는지 여부")
-    feedback_korean: str = Field(description="유저 답변에 대한 간략한 한국어 피드백")
 
-    # 다음 게임 상태 제어
-    next_keyword_seq: Optional[int] = Field(description="설명할 다음 키워드 seq (대화 종료시 None)", default=None)
-    conversation_status: str = Field(description="현재 대화 상태 (CONTINUE, KEYWORD_DONE, ASSET_DONE)")
+class GameState(BaseModel):
+    save_slot_name: str = "default"
+    last_updated: str = ""
+
+    player_info: Optional[PersonaInfo] = None
+    npc_info: Optional[PersonaInfo] = None
+
+    chat_history: List[ChatMessage] = []
+    evaluation_logs: List[EvaluationLog] = []
+    heritages: List[HeritageStatus]
+    current_index: int = 0
+    retry_count: int = 0
+
+
+# ==========================================
+# [2] Gemini 서비스 내부 통신용 모델 (Server <-> Gemini)
+# ==========================================
+
+class GeminiEvalRequest(BaseModel):
+    npc_persona: str
+    user_input: str
+    pronunciation_score: float
+    target_keyword: str
+    sample_question: str
+    retry_count: int
+
+
+class GeminiEvalResponse(BaseModel):
+    evaluation: str = Field(description="PASS 또는 FAIL")
+    reason: str = Field(description="판단 이유")
+    reaction: str = Field(description="유저에게 할 말 (리액션)")
+    next_question: Optional[str] = Field(default="", description="다음 질문")
+    feedback_korean: str = Field(description="한국어 피드백")
+
+    # [핵심 수정 1] evaluation 필드에 Bool 타입이 들어와도 처리하도록 수정
+    @field_validator('evaluation', mode='before')
+    @classmethod
+    def parse_evaluation(cls, v):
+        # 불리언(True/False)이 들어오면 문자열로 변환
+        if isinstance(v, bool):
+            return "PASS" if v else "FAIL"
+        # 소문자(pass/fail)가 들어오면 대문자로 변환
+        if isinstance(v, str):
+            return v.upper()
+        return v
+
+    # [핵심 수정 2] next_question 필드에 null이 들어와도 처리하도록 수정
+    @field_validator('next_question', mode='before')
+    @classmethod
+    def allow_none(cls, v):
+        if v is None:
+            return ""
+        return v
